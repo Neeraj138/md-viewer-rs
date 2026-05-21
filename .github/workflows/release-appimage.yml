@@ -54,6 +54,11 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p dist
+          ls -la target/appimage || true
+          if ! ls target/appimage/*.AppImage >/dev/null 2>&1; then
+            echo "No AppImage produced. Check earlier cargo appimage logs."
+            exit 1
+          fi
           cp target/appimage/*.AppImage dist/
 
       - name: Upload workflow artifact
