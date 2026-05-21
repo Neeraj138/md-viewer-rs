@@ -6,7 +6,7 @@ use std::{
 
 use clap::Parser;
 use eframe::egui::{
-    self, FontFamily, FontId, Key, RichText, TextStyle, TopBottomPanel, ViewportBuilder,
+    self, Align, FontFamily, FontId, Key, RichText, TextStyle, TopBottomPanel, ViewportBuilder,
 };
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use fontdb::{Database, Source, Style as FontStyle};
@@ -42,6 +42,8 @@ struct MarkdownViewerApp {
     content_width: f32,
     system_fonts: Vec<String>,
     font_faces: HashMap<String, Vec<FaceCandidate>>,
+    toc_open: bool,
+    scroll_to_section: Option<usize>,
 }
 
 enum MarkdownBlock {
@@ -50,6 +52,12 @@ enum MarkdownBlock {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
     },
+}
+
+struct Section {
+    title: String,
+    content: String,
+    level: u8,
 }
 
 #[derive(Clone)]
@@ -82,6 +90,8 @@ impl MarkdownViewerApp {
             content_width: 860.0,
             system_fonts,
             font_faces,
+            toc_open: true,
+            scroll_to_section: None,
         };
 
         app.apply_theme(&cc.egui_ctx);
@@ -121,21 +131,30 @@ impl MarkdownViewerApp {
         }
     }
 
-    fn apply_font_definitions(&self, ctx: &egui::Context) {
+    fn apply_font_definitions(&mut self, ctx: &egui::Context) {
         let mut defs = egui::FontDefinitions::default();
-        for (family_name, prefer_mono) in [(&self.body_font, false), (&self.mono_font, true)] {
-            let Some(path) = self.select_font_file(family_name, prefer_mono) else {
-                continue;
-            };
-            let Ok(bytes) = fs::read(path) else {
-                continue;
-            };
-
-            let font_key = format!("system::{family_name}");
+        if let Some(path) = self.select_font_file(&self.body_font, false)
+            && let Ok(bytes) = fs::read(path)
+        {
+            let font_key = "user_body_font".to_owned();
             defs.font_data
                 .insert(font_key.clone(), egui::FontData::from_owned(bytes).into());
             defs.families
-                .insert(FontFamily::Name(family_name.clone().into()), vec![font_key]);
+                .entry(FontFamily::Proportional)
+                .or_default()
+                .insert(0, font_key);
+        }
+
+        if let Some(path) = self.select_font_file(&self.mono_font, true)
+            && let Ok(bytes) = fs::read(path)
+        {
+            let font_key = "user_mono_font".to_owned();
+            defs.font_data
+                .insert(font_key.clone(), egui::FontData::from_owned(bytes).into());
+            defs.families
+                .entry(FontFamily::Monospace)
+                .or_default()
+                .insert(0, font_key);
         }
         ctx.set_fonts(defs);
     }
@@ -164,8 +183,8 @@ impl MarkdownViewerApp {
 
     fn markdown_style(&self, ctx: &egui::Context) -> egui::Style {
         let scale = self.font_size * self.zoom;
-        let body_family = FontFamily::Name(self.body_font.clone().into());
-        let mono_family = FontFamily::Name(self.mono_font.clone().into());
+        let body_family = FontFamily::Proportional;
+        let mono_family = FontFamily::Monospace;
 
         let mut style = (*ctx.style()).clone();
         style.text_styles = [
@@ -239,6 +258,13 @@ impl eframe::App for MarkdownViewerApp {
 
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button(if self.toc_open { "◧" } else { "☰" })
+                    .on_hover_text("Toggle sections panel")
+                    .clicked()
+                {
+                    self.toc_open = !self.toc_open;
+                }
                 if ui.button("Open").clicked() {
                     self.open_dialog();
                 }
@@ -327,6 +353,29 @@ impl eframe::App for MarkdownViewerApp {
             });
         });
 
+        let sections = split_markdown_sections(&self.markdown_rendered);
+        if self.toc_open {
+            egui::SidePanel::left("toc_panel")
+                .resizable(true)
+                .default_width(230.0)
+                .min_width(180.0)
+                .show(ctx, |ui| {
+                    ui.heading("Sections");
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for (idx, section) in sections.iter().enumerate() {
+                            let indent = f32::from(section.level.saturating_sub(1)) * 12.0;
+                            ui.horizontal(|ui| {
+                                ui.add_space(indent);
+                                if ui.button(&section.title).clicked() {
+                                    self.scroll_to_section = Some(idx);
+                                }
+                            });
+                        }
+                    });
+                });
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(path) = &self.current_path {
                 ui.label(
@@ -353,6 +402,7 @@ impl eframe::App for MarkdownViewerApp {
                         available
                     };
                     let markdown_style = self.markdown_style(ctx);
+                    let mut section_counter = 0usize;
 
                     if self.center_content && target_width < available {
                         let side = ((available - target_width) * 0.5).max(0.0);
@@ -364,32 +414,15 @@ impl eframe::App for MarkdownViewerApp {
                                 |ui| {
                                     ui.set_style(markdown_style);
                                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                    let blocks = split_markdown_blocks(&self.markdown_rendered);
-                                    let mut table_idx = 0usize;
-                                    for block in blocks {
-                                        match block {
-                                            MarkdownBlock::Markdown(text) => {
-                                                if !text.trim().is_empty() {
-                                                    CommonMarkViewer::new()
-                                                        .default_width(Some(target_width as usize))
-                                                        .syntax_theme_dark("Dracula")
-                                                        .syntax_theme_light("Solarized (light)")
-                                                        .show(ui, &mut self.cache, &text);
-                                                }
-                                            }
-                                            MarkdownBlock::Table { headers, rows } => {
-                                                table_idx += 1;
-                                                render_table_block(
-                                                    ui,
-                                                    &format!("md_table_centered_{table_idx}"),
-                                                    &headers,
-                                                    &rows,
-                                                    target_width,
-                                                );
-                                                ui.add_space(10.0);
-                                            }
-                                        }
-                                    }
+                                    render_sections(
+                                        ui,
+                                        &mut self.cache,
+                                        &sections,
+                                        target_width,
+                                        &mut self.scroll_to_section,
+                                        &mut section_counter,
+                                        "centered",
+                                    );
                                 },
                             );
                         });
@@ -400,37 +433,121 @@ impl eframe::App for MarkdownViewerApp {
                             |ui| {
                                 ui.set_style(markdown_style);
                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                                let blocks = split_markdown_blocks(&self.markdown_rendered);
-                                let mut table_idx = 0usize;
-                                for block in blocks {
-                                    match block {
-                                        MarkdownBlock::Markdown(text) => {
-                                            if !text.trim().is_empty() {
-                                                CommonMarkViewer::new()
-                                                    .default_width(Some(target_width as usize))
-                                                    .syntax_theme_dark("Dracula")
-                                                    .syntax_theme_light("Solarized (light)")
-                                                    .show(ui, &mut self.cache, &text);
-                                            }
-                                        }
-                                        MarkdownBlock::Table { headers, rows } => {
-                                            table_idx += 1;
-                                            render_table_block(
-                                                ui,
-                                                &format!("md_table_normal_{table_idx}"),
-                                                &headers,
-                                                &rows,
-                                                target_width,
-                                            );
-                                            ui.add_space(10.0);
-                                        }
-                                    }
-                                }
+                                render_sections(
+                                    ui,
+                                    &mut self.cache,
+                                    &sections,
+                                    target_width,
+                                    &mut self.scroll_to_section,
+                                    &mut section_counter,
+                                    "normal",
+                                );
                             },
                         );
                     }
                 });
         });
+    }
+}
+
+fn split_markdown_sections(markdown: &str) -> Vec<Section> {
+    let mut sections = Vec::new();
+    let mut current_title = "Document".to_owned();
+    let mut current_level: u8 = 1;
+    let mut current = Vec::new();
+
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        let heading = if let Some(rest) = trimmed.strip_prefix("# ") {
+            Some((1u8, rest))
+        } else if let Some(rest) = trimmed.strip_prefix("## ") {
+            Some((2u8, rest))
+        } else if let Some(rest) = trimmed.strip_prefix("### ") {
+            Some((3u8, rest))
+        } else if let Some(rest) = trimmed.strip_prefix("#### ") {
+            Some((4u8, rest))
+        } else {
+            None
+        };
+
+        if let Some((level, rest)) = heading {
+            if !current.is_empty() {
+                sections.push(Section {
+                    title: current_title,
+                    content: current.join("\n"),
+                    level: current_level,
+                });
+                current.clear();
+            }
+            current_title = rest.trim().to_owned();
+            current_level = level;
+        }
+        current.push(line.to_owned());
+    }
+
+    if !current.is_empty() {
+        sections.push(Section {
+            title: current_title,
+            content: current.join("\n"),
+            level: current_level,
+        });
+    }
+
+    if sections.is_empty() {
+        sections.push(Section {
+            title: "Document".to_owned(),
+            content: markdown.to_owned(),
+            level: 1,
+        });
+    }
+
+    sections
+}
+
+fn render_sections(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    sections: &[Section],
+    target_width: f32,
+    scroll_to_section: &mut Option<usize>,
+    section_counter: &mut usize,
+    scope: &str,
+) {
+    for (idx, section) in sections.iter().enumerate() {
+        let anchor =
+            ui.allocate_response(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        if scroll_to_section.as_ref() == Some(&idx) {
+            ui.scroll_to_rect(anchor.rect, Some(Align::TOP));
+            *scroll_to_section = None;
+        }
+
+        let blocks = split_markdown_blocks(&section.content);
+        let mut table_idx = 0usize;
+        for block in blocks {
+            match block {
+                MarkdownBlock::Markdown(text) => {
+                    if !text.trim().is_empty() {
+                        CommonMarkViewer::new()
+                            .default_width(Some(target_width as usize))
+                            .syntax_theme_dark("Dracula")
+                            .syntax_theme_light("Solarized (light)")
+                            .show(ui, cache, &text);
+                    }
+                }
+                MarkdownBlock::Table { headers, rows } => {
+                    table_idx += 1;
+                    render_table_block(
+                        ui,
+                        &format!("md_table_{scope}_{}_{}", *section_counter, table_idx),
+                        &headers,
+                        &rows,
+                        target_width,
+                    );
+                    ui.add_space(10.0);
+                }
+            }
+        }
+        *section_counter += 1;
     }
 }
 
@@ -530,34 +647,10 @@ fn normalize_markdown_for_viewer(markdown: &str) -> String {
             continue;
         }
 
-        out.push(pad_inline_code(line));
+        out.push(line.to_owned());
     }
 
     out.join("\n")
-}
-
-fn pad_inline_code(line: &str) -> String {
-    let mut out = String::with_capacity(line.len() + 8);
-    let mut parts = line.split('`').peekable();
-    let mut inside = false;
-
-    while let Some(part) = parts.next() {
-        if inside && !part.is_empty() {
-            out.push('`');
-            out.push(' ');
-            out.push_str(part.trim());
-            out.push(' ');
-            out.push('`');
-        } else {
-            out.push_str(part);
-            if parts.peek().is_some() {
-                out.push('`');
-            }
-        }
-        inside = !inside;
-    }
-
-    out
 }
 
 fn is_table_row(line: &str) -> bool {
@@ -645,66 +738,57 @@ fn render_table_block(
         .show(ui, |ui| {
             let left_w = col_widths.first().copied().unwrap_or(220.0);
             let right_w = col_widths.get(1).copied().unwrap_or(420.0);
-            let divider_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
 
             let render_row = |ui: &mut egui::Ui, left: &str, right: &str, is_header: bool| {
-                let row_resp = ui
-                    .horizontal_top(|ui| {
-                        let left_resp = ui.allocate_ui_with_layout(
-                            egui::vec2(left_w, 0.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.set_max_width(left_w);
-                                let txt = if is_header {
-                                    RichText::new(left).strong()
-                                } else {
-                                    RichText::new(left)
-                                };
-                                ui.add(egui::Label::new(txt).wrap());
-                            },
-                        );
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(left_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_max_width(left_w);
+                            let txt = if is_header {
+                                RichText::new(left).strong()
+                            } else {
+                                RichText::new(left)
+                            };
+                            ui.add(egui::Label::new(txt).wrap());
+                        },
+                    );
 
-                        ui.add_space(10.0);
+                    ui.add_space(18.0);
 
-                        let right_resp = ui.allocate_ui_with_layout(
-                            egui::vec2(right_w, 0.0),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| {
-                                ui.set_max_width(right_w);
-                                let txt = if is_header {
-                                    RichText::new(right).strong()
-                                } else {
-                                    RichText::new(right)
-                                };
-                                ui.add(egui::Label::new(txt).wrap());
-                            },
-                        );
-
-                        (left_resp.response.rect, right_resp.response.rect)
-                    })
-                    .inner;
-
-                let left_rect = row_resp.0;
-                let right_rect = row_resp.1;
-                let x = left_rect.right() + 5.0;
-                let y_min = left_rect.top().min(right_rect.top());
-                let y_max = left_rect.bottom().max(right_rect.bottom());
-                ui.painter().line_segment(
-                    [egui::pos2(x, y_min), egui::pos2(x, y_max)],
-                    egui::Stroke::new(1.0, divider_color),
-                );
-                ui.add_space(8.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(right_w, 0.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_max_width(right_w);
+                            let txt = if is_header {
+                                RichText::new(right).strong()
+                            } else {
+                                RichText::new(right)
+                            };
+                            ui.add(egui::Label::new(txt).wrap());
+                        },
+                    );
+                });
             };
 
             let left_header = headers.first().map(String::as_str).unwrap_or("Column 1");
             let right_header = headers.get(1).map(String::as_str).unwrap_or("Column 2");
             render_row(ui, left_header, right_header, true);
+            ui.add_space(8.0);
             ui.separator();
+            ui.add_space(8.0);
 
-            for row in rows {
+            for (idx, row) in rows.iter().enumerate() {
                 let left = row.first().map(String::as_str).unwrap_or("");
                 let right = row.get(1).map(String::as_str).unwrap_or("");
                 render_row(ui, left, right, false);
+                ui.add_space(8.0);
+                if idx + 1 < rows.len() {
+                    ui.separator();
+                    ui.add_space(8.0);
+                }
             }
         });
 }
