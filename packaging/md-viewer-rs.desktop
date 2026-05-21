@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=MD Viewer RS
+Comment=Lightweight read-only Markdown viewer
+Exec=/home/YOUR_USER/.cargo/bin/md-viewer-rs
+Icon=text-markdown
+Terminal=false
+Categories=Utility;Office;TextEditor;
+MimeType=text/markdown;text/plain;
+StartupNotify=true
