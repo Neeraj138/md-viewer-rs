@@ -39,7 +39,16 @@ jobs:
       - name: Install cargo-appimage
         run: cargo install cargo-appimage
 
+      - name: Install appimagetool
+        run: |
+          wget -O appimagetool.AppImage \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          sudo mv appimagetool.AppImage /usr/local/bin/appimagetool
+
       - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: cargo appimage
 
       - name: Collect artifacts
