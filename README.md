@@ -51,6 +51,42 @@ cargo install --path .
 md-viewer-rs /path/to/file.md
 ```
 
+## Easy Distribution for Non-Technical Users (AppImage)
+
+### For end users
+1. Open the repository's **Releases** page.
+2. Download `md-viewer-rs-*.AppImage`.
+3. Make it executable:
+   ```bash
+   chmod +x md-viewer-rs-*.AppImage
+   ```
+4. Run it:
+   ```bash
+   ./md-viewer-rs-*.AppImage
+   ```
+
+### Optional: Add to app menu and Open With
+- Install AppImageLauncher (recommended), then open the AppImage once and choose **Integrate**.
+- After integration, it appears in the application menu and can be selected in **Open With** for `.md` files.
+
+Without AppImageLauncher, users can still run the AppImage directly.
+
+## Auto-build AppImage with GitHub Actions
+
+This repo includes a workflow at:
+- `.github/workflows/release-appimage.yml`
+
+What it does:
+- Builds AppImage on Ubuntu runner.
+- Uploads AppImage as a workflow artifact.
+- On tag pushes like `v1.0.0`, creates a GitHub Release and attaches the AppImage.
+
+How to trigger release build:
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Basic How-To
 - Open a file:
   - Click `Open` in the top bar, or press `Ctrl+O`.
